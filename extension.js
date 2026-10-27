@@ -269,13 +269,18 @@ async function fetchChatGPT() {
 
 // ---------- Display ----------
 
+// Right-aligned items with higher priority sit further left. Core editor items (Ln/Col through language mode) use
+// 100.1–100.5 and most extensions 0–100, so both items sit to the right of those, and the tiny gap between their
+// priorities keeps anything else from landing between them.
+const PRIORITY = -1000;
+
 const SOURCES = [
   {
     id: "claude",
     title: "Claude",
     icon: "$(ai-usage-claude)",
     setting: "showClaude",
-    priority: 101,
+    priority: PRIORITY,
     fetch: fetchClaude,
     footnote: () => t("Based on your Claude Code account · shared with claude.ai and the desktop app."),
   },
@@ -284,7 +289,7 @@ const SOURCES = [
     title: "ChatGPT",
     icon: "$(ai-usage-chatgpt)",
     setting: "showChatGPT",
-    priority: 100,
+    priority: PRIORITY - 0.001,
     fetch: fetchChatGPT,
     footnote: () => t("Based on Codex usage limits · OpenAI offers no way to check ChatGPT chat message limits."),
   },
