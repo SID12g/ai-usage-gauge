@@ -1,6 +1,6 @@
 {
   "displayName": "AI Usage Gauge",
-  "description": "Shows your remaining Claude and ChatGPT (Codex) usage limits in the status bar. Unofficial; not affiliated with Anthropic or OpenAI.",
+  "description": "See how much of your Claude and ChatGPT (Codex) usage limits is left, right in the status bar. Unofficial; not affiliated with Anthropic or OpenAI.",
   "icon.claude": "Claude logo",
   "icon.chatgpt": "ChatGPT logo",
   "command.refresh": "Refresh",

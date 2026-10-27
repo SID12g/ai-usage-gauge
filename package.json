@@ -1,5 +1,5 @@
 {
-  "name": "ai-usage-statusbar",
+  "name": "ai-usage-statusbar-by-sid12g",
   "displayName": "%displayName%",
   "description": "%description%",
   "version": "0.2.1",
@@ -21,17 +21,22 @@
   "keywords": [
     "claude",
     "claude code",
+    "anthropic",
     "chatgpt",
     "codex",
+    "openai",
     "usage",
-    "quota",
+    "usage limits",
     "rate limit",
-    "status bar"
+    "quota",
+    "status bar",
+    "statusbar"
   ],
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
+    "AI",
     "Other"
   ],
   "main": "./extension.js",
