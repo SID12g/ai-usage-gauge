@@ -1,0 +1,13 @@
+{
+  "displayName": "AI Usage Gauge",
+  "description": "Shows your remaining Claude and ChatGPT (Codex) usage limits in the status bar. Unofficial; not affiliated with Anthropic or OpenAI.",
+  "icon.claude": "Claude logo",
+  "icon.chatgpt": "ChatGPT logo",
+  "command.refresh": "Refresh",
+  "category": "AI Usage",
+  "config.title": "AI Usage",
+  "config.refreshIntervalSeconds": "How often to check usage, in seconds. Results are shared across open VS Code windows within this interval.",
+  "config.showClaude": "Show Claude usage in the status bar.",
+  "config.showChatGPT": "Show ChatGPT (Codex) usage in the status bar.",
+  "config.codexPath": "Path to the codex executable. Leave empty to search PATH and common install locations (Homebrew, pnpm, npm, etc.)."
+}

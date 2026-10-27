@@ -1,8 +1,7 @@
-// Claude와 ChatGPT(Codex)의 남은 사용량을 상태 표시줄에 보여주는 확장.
-// 조회 방식은 ../usage_server.py 와 같습니다.
-// - Claude: Claude Code 로그인 토큰(macOS 키체인)으로 Anthropic 사용량 API를 조회합니다.
-//   토큰은 api.anthropic.com 으로만 전송되며 화면이나 캐시에는 남지 않습니다.
-// - ChatGPT: `codex app-server`에 사용량을 물어봅니다. 인증은 Codex CLI가 직접 처리합니다.
+// Shows the remaining Claude and ChatGPT (Codex) usage in the status bar.
+// - Claude: queries the Anthropic usage API with the Claude Code login token (macOS Keychain).
+//   The token is sent only to api.anthropic.com and never shown or cached.
+// - ChatGPT: asks `codex app-server` for usage. The Codex CLI handles authentication itself.
 
 const vscode = require("vscode");
 const { execFile, spawn } = require("child_process");
@@ -13,19 +12,24 @@ const readline = require("readline");
 const { promisify } = require("util");
 
 const execFileAsync = promisify(execFile);
+const t = (...args) => vscode.l10n.t(...args);
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-// 응답 키 -> [표시 이름, 상태 표시줄 약칭(null이면 툴팁에만 표시), 정렬 순서]
-const CLAUDE_WINDOWS = {
-  five_hour: ["5시간", "5h", 0],
-  seven_day: ["주간 · 전체 모델", "7d", 1],
-  seven_day_opus: ["주간 · Opus", null, 2],
-  seven_day_sonnet: ["주간 · Sonnet", null, 3],
-  seven_day_oauth_apps: ["주간 · 연동 앱", null, 4],
-  extra_usage: ["추가 사용량 · 월간", null, 5],
-};
 
-// Dock에서 실행한 VS Code는 셸의 PATH를 물려받지 못할 수 있어 흔한 설치 위치를 덧붙입니다.
+// The l10n bundle may not be loaded yet when this module is required, so translated labels are built on demand.
+// Response key -> [label, status bar short label (null = tooltip only), sort order]
+function claudeWindows() {
+  return {
+    five_hour: [t("5-hour"), "5h", 0],
+    seven_day: [t("Weekly · All models"), "7d", 1],
+    seven_day_opus: [t("Weekly · Opus"), null, 2],
+    seven_day_sonnet: [t("Weekly · Sonnet"), null, 3],
+    seven_day_oauth_apps: [t("Weekly · Connected apps"), null, 4],
+    extra_usage: [t("Extra usage · Monthly"), null, 5],
+  };
+}
+
+// VS Code launched from the Dock may not inherit the shell's PATH, so common install locations are appended.
 const EXTRA_BIN_DIRS = [
   "/opt/homebrew/bin",
   "/usr/local/bin",
@@ -37,18 +41,29 @@ const EXTRA_BIN_DIRS = [
 ].map((dir) => dir.replace(/^~/, os.homedir()));
 
 const STATE_ICON = { warn: "$(warning)", crit: "$(error)", out: "$(error)" };
-const STATE_TEXT = { warn: "곧 소진", crit: "거의 소진", out: "한도 도달" };
 const STATE_BACKGROUND = {
   warn: "statusBarItem.warningBackground",
   crit: "statusBarItem.errorBackground",
   out: "statusBarItem.errorBackground",
 };
 
-const timeFmt = new Intl.DateTimeFormat("ko-KR", { hour: "numeric", minute: "2-digit" });
-const dayTimeFmt = new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", weekday: "short", hour: "numeric", minute: "2-digit" });
-const dayFmt = new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", weekday: "short" });
+function stateText(state) {
+  return { warn: t("Running low"), crit: t("Almost out"), out: t("Limit reached") }[state];
+}
 
-/** 사용자에게 그대로 보여줄 수 있는 조회 실패. */
+function dateFormat(options) {
+  try {
+    return new Intl.DateTimeFormat(vscode.env.language, options);
+  } catch {
+    return new Intl.DateTimeFormat(undefined, options);
+  }
+}
+
+const timeFmt = dateFormat({ hour: "numeric", minute: "2-digit" });
+const dayTimeFmt = dateFormat({ month: "short", day: "numeric", weekday: "short", hour: "numeric", minute: "2-digit" });
+const dayFmt = dateFormat({ month: "short", day: "numeric", weekday: "short" });
+
+/** A lookup failure whose message can be shown to the user as is. */
 class SourceError extends Error {}
 
 // ---------- Claude ----------
@@ -69,7 +84,7 @@ async function claudeCredentials() {
   } catch {}
   const usable = candidates.filter((c) => c && c.accessToken);
   if (!usable.length) {
-    throw new SourceError("Claude Code 로그인 정보를 찾지 못했습니다. 터미널에서 `claude`를 실행해 로그인하세요.");
+    throw new SourceError(t("Claude Code sign-in not found. Run `claude` in a terminal to sign in."));
   }
   return usable.reduce((a, b) => ((b.expiresAt || 0) > (a.expiresAt || 0) ? b : a));
 }
@@ -83,8 +98,8 @@ function claudePlan(creds) {
 async function fetchClaude() {
   const creds = await claudeCredentials();
   if ((creds.expiresAt || 0) < Date.now()) {
-    // 여기서 직접 갱신하면 Claude Code의 refresh token이 바뀌어 로그인이 풀릴 수 있어 갱신은 Claude Code에 맡깁니다.
-    throw new SourceError("Claude Code 토큰이 만료되었습니다. 터미널에서 `claude`를 한 번 실행하면 다시 조회됩니다.");
+    // Refreshing here would rotate Claude Code's refresh token and could sign it out, so refreshing is left to Claude Code.
+    throw new SourceError(t("The Claude Code token has expired. Run `claude` once in a terminal and usage will load again."));
   }
 
   let res;
@@ -98,23 +113,24 @@ async function fetchClaude() {
       signal: AbortSignal.timeout(15000),
     });
   } catch {
-    throw new SourceError("Anthropic 사용량 API에 연결하지 못했습니다.");
+    throw new SourceError(t("Could not connect to the Anthropic usage API."));
   }
   if (!res.ok) {
-    const hint = res.status === 429 ? " 잠시 후 다시 조회합니다." : "";
-    throw new SourceError(`Anthropic 사용량 API가 ${res.status} 응답을 반환했습니다.${hint}`);
+    const hint = res.status === 429 ? ` ${t("Will try again shortly.")}` : "";
+    throw new SourceError(`${t("The Anthropic usage API returned {0}.", res.status)}${hint}`);
   }
 
   const data = await res.json();
+  const known = claudeWindows();
   const windows = [];
   for (const [key, value] of Object.entries(data)) {
     if (!value || typeof value !== "object" || typeof value.utilization !== "number") continue;
-    const [label, short, order] = CLAUDE_WINDOWS[key] || [key.replace(/_/g, " "), null, 99];
+    const [label, short, order] = known[key] || [key.replace(/_/g, " "), null, 99];
     const resetsAt = Date.parse(value.resets_at) / 1000;
     windows.push({ label, short, order, usedPercent: value.utilization, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null });
   }
   if (!windows.length) {
-    throw new SourceError(`사용량 응답 형식을 인식하지 못했습니다 (키: ${Object.keys(data).join(", ")}).`);
+    throw new SourceError(t("Unrecognized usage response format (keys: {0}).", Object.keys(data).join(", ")));
   }
   windows.sort((a, b) => a.order - b.order);
   return { plan: claudePlan(creds), windows };
@@ -140,12 +156,12 @@ function codexCommand() {
   return null;
 }
 
-/** calls = {id: [method, params]} 를 codex app-server 에 보내고 {id: result} 를 돌려줍니다. */
+/** Sends calls = {id: [method, params]} to codex app-server and resolves to {id: result}. */
 function codexRpc(calls, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const command = codexCommand();
     if (!command) {
-      reject(new SourceError("codex CLI를 찾지 못했습니다. Codex를 설치하거나 설정에서 `aiUsage.codexPath`를 지정하세요."));
+      reject(new SourceError(t("Could not find the codex CLI. Install Codex or set `aiUsage.codexPath` in settings.")));
       return;
     }
 
@@ -156,7 +172,7 @@ function codexRpc(calls, timeoutMs = 20000) {
     const lines = readline.createInterface({ input: child.stdout });
     const results = {};
     let done = false;
-    const timer = setTimeout(() => finish(new SourceError("codex app-server 응답이 너무 늦습니다.")), timeoutMs);
+    const timer = setTimeout(() => finish(new SourceError(t("codex app-server took too long to respond."))), timeoutMs);
 
     function finish(error) {
       if (done) return;
@@ -167,9 +183,9 @@ function codexRpc(calls, timeoutMs = 20000) {
       error ? reject(error) : resolve(results);
     }
 
-    child.on("error", () => finish(new SourceError(`codex를 실행하지 못했습니다 (${command}).`)));
+    child.on("error", () => finish(new SourceError(t("Could not run codex ({0}).", command))));
     child.stdin.on("error", () => {});
-    lines.on("close", () => finish(new SourceError("codex app-server가 예기치 않게 종료되었습니다.")));
+    lines.on("close", () => finish(new SourceError(t("codex app-server exited unexpectedly."))));
     lines.on("line", (line) => {
       let msg;
       try {
@@ -197,11 +213,11 @@ function codexRpc(calls, timeoutMs = 20000) {
 }
 
 function windowLabel(mins) {
-  if (!mins) return "사용 한도";
-  if (mins === 10080) return "주간";
-  if (mins % 1440 === 0) return `${mins / 1440}일`;
-  if (mins % 60 === 0) return `${mins / 60}시간`;
-  return `${mins}분`;
+  if (!mins) return t("Usage limit");
+  if (mins === 10080) return t("Weekly");
+  if (mins % 1440 === 0) return t("{0}-day", mins / 1440);
+  if (mins % 60 === 0) return t("{0}-hour", mins / 60);
+  return t("{0}-minute", mins);
 }
 
 function windowShort(mins) {
@@ -215,13 +231,13 @@ async function fetchChatGPT() {
   const res = await codexRpc({ 1: ["account/rateLimits/read", null], 2: ["account/read", {}] });
   const account = res[2].account;
   if (!account || account.type !== "chatgpt") {
-    throw new SourceError("Codex에 ChatGPT 계정으로 로그인되어 있지 않습니다. 터미널에서 `codex login`을 실행하세요.");
+    throw new SourceError(t("Codex is not signed in with a ChatGPT account. Run `codex login` in a terminal."));
   }
 
   const rate = res[1];
   const limits = rate.rateLimitsByLimitId || { codex: rate.rateLimits };
   const ids = Object.keys(limits).filter((id) => limits[id]);
-  // 한도가 여러 개면 상태 표시줄에는 기본 Codex 한도만 보여주고 나머지는 툴팁에 둡니다.
+  // With several limits, the status bar shows only the default Codex limit and the rest go to the tooltip.
   const mainId = ids.includes("codex") ? "codex" : ids[0];
   const windows = [];
   for (const id of ids) {
@@ -238,7 +254,7 @@ async function fetchChatGPT() {
       });
     }
   }
-  if (!windows.length) throw new SourceError("Codex가 사용 한도 정보를 돌려주지 않았습니다.");
+  if (!windows.length) throw new SourceError(t("Codex did not return any usage limits."));
 
   const available = ((rate.rateLimitResetCredits || {}).credits || []).filter((c) => c.status === "available");
   const expiries = available.map((c) => c.expiresAt).filter(Boolean);
@@ -251,7 +267,7 @@ async function fetchChatGPT() {
   };
 }
 
-// ---------- 표시 ----------
+// ---------- Display ----------
 
 const SOURCES = [
   {
@@ -261,7 +277,7 @@ const SOURCES = [
     setting: "showClaude",
     priority: 101,
     fetch: fetchClaude,
-    footnote: "Claude Code 로그인 계정 기준 · claude.ai, 데스크톱 앱과 같은 한도를 함께 씁니다.",
+    footnote: () => t("Based on your Claude Code account · shared with claude.ai and the desktop app."),
   },
   {
     id: "chatgpt",
@@ -270,7 +286,7 @@ const SOURCES = [
     setting: "showChatGPT",
     priority: 100,
     fetch: fetchChatGPT,
-    footnote: "Codex 사용 한도 기준 · ChatGPT 채팅 메시지 한도는 OpenAI가 조회 방법을 제공하지 않습니다.",
+    footnote: () => t("Based on Codex usage limits · OpenAI offers no way to check ChatGPT chat message limits."),
   },
 ];
 
@@ -292,43 +308,43 @@ function stateOf(remaining) {
 function resetText(epochSec) {
   const ms = epochSec * 1000;
   const mins = Math.round((ms - Date.now()) / 60000);
-  if (mins <= 0) return "곧 초기화";
+  if (mins <= 0) return t("Resetting soon");
   const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), m = mins % 60;
-  const parts = d ? [`${d}일`, h && `${h}시간`] : h ? [`${h}시간`, m && `${m}분`] : [`${m}분`];
+  const parts = d ? [t("{0}d", d), h && t("{0}h", h)] : h ? [t("{0}h", h), m && t("{0}m", m)] : [t("{0}m", m)];
   const at = (ms - Date.now() < 86400000 ? timeFmt : dayTimeFmt).format(ms);
-  return `${parts.filter(Boolean).join(" ")} 후 · ${at}`;
+  return t("in {0} · {1}", parts.filter(Boolean).join(" "), at);
 }
 
 function tooltip(source, result) {
   const md = new vscode.MarkdownString("", true);
   md.isTrusted = { enabledCommands: ["aiUsage.refresh"] };
-  md.appendMarkdown(`**${source.title} 남은 사용량**${result.plan ? ` · ${result.plan}` : ""}\n\n`);
+  md.appendMarkdown(`**${t("{0} usage remaining", source.title)}**${result.plan ? ` · ${result.plan}` : ""}\n\n`);
 
   if (!result.ok) {
     md.appendMarkdown(`$(error) ${result.error}\n\n`);
   } else {
-    md.appendMarkdown("| 한도 | 남음 | 초기화 |\n|:--|--:|:--|\n");
+    md.appendMarkdown(`| ${t("Limit")} | ${t("Left")} | ${t("Resets")} |\n|:--|--:|:--|\n`);
     for (const w of result.windows) {
       const remaining = remainingOf(w);
       const state = stateOf(remaining);
-      const badge = STATE_TEXT[state] ? ` ${STATE_ICON[state]} ${STATE_TEXT[state]}` : "";
+      const badge = stateText(state) ? ` ${STATE_ICON[state]} ${stateText(state)}` : "";
       md.appendMarkdown(`| ${w.label}${badge} | **${remaining}%** | ${w.resetsAt ? resetText(w.resetsAt) : "—"} |\n`);
     }
     const rc = result.resetCredits;
     if (rc && rc.count) {
-      const expiry = rc.nextExpiry ? ` · 가장 빠른 만료 ${dayFmt.format(rc.nextExpiry * 1000)}` : "";
-      md.appendMarkdown(`\n한도 초기화 쿠폰 ${rc.count}장 보유${expiry}\n`);
+      const expiry = rc.nextExpiry ? ` · ${t("earliest expires {0}", dayFmt.format(rc.nextExpiry * 1000))}` : "";
+      md.appendMarkdown(`\n${t("Limit reset credits: {0}", rc.count)}${expiry}\n`);
     }
-    if (result.creditBalance != null) md.appendMarkdown(`\n크레딧 잔액 ${result.creditBalance}\n`);
+    if (result.creditBalance != null) md.appendMarkdown(`\n${t("Credit balance: {0}", result.creditBalance)}\n`);
   }
 
-  md.appendMarkdown(`\n${source.footnote}\n\n---\n\n마지막 조회 ${timeFmt.format(result.at)} · [새로고침](command:aiUsage.refresh)`);
+  md.appendMarkdown(`\n${source.footnote()}\n\n---\n\n${t("Last checked {0}", timeFmt.format(result.at))} · [${t("Refresh")}](command:aiUsage.refresh)`);
   return md;
 }
 
 function renderItem(item, source, result) {
   item.backgroundColor = undefined;
-  item.tooltip = result ? tooltip(source, result) : `${source.title} 사용량을 불러오는 중…`;
+  item.tooltip = result ? tooltip(source, result) : t("Loading {0} usage…", source.title);
   if (!result) {
     item.text = `${source.icon} $(sync~spin)`;
   } else if (!result.ok) {
@@ -341,18 +357,18 @@ function renderItem(item, source, result) {
     item.text = [source.icon, STATE_ICON[worst], parts.join(" · ")].filter(Boolean).join(" ");
     if (STATE_BACKGROUND[worst]) item.backgroundColor = new vscode.ThemeColor(STATE_BACKGROUND[worst]);
   }
-  // 화면에는 로고만 보이므로 화면 낭독기에는 서비스 이름을 함께 읽어 줍니다.
+  // Only the logo is visible, so screen readers also get the service name.
   const spoken = item.text.replace(/\$\([^)]+\)/g, "").replace(/\s+/g, " ").trim();
   item.accessibilityInformation = { label: `${source.title} ${spoken}`.trim() };
 }
 
-// ---------- 수명 주기 ----------
+// ---------- Lifecycle ----------
 
 async function load(source) {
   try {
     return { ok: true, at: Date.now(), ...(await source.fetch()) };
   } catch (e) {
-    return { ok: false, at: Date.now(), error: e instanceof SourceError ? e.message : `예상치 못한 오류 (${e.name})` };
+    return { ok: false, at: Date.now(), error: e instanceof SourceError ? e.message : t("Unexpected error ({0})", e.name) };
   }
 }
 
@@ -372,7 +388,7 @@ async function writeCache(file, cache) {
 }
 
 function activate(context) {
-  // 창마다 확장이 따로 돌기 때문에 조회 결과를 파일로 공유해 API를 중복 호출하지 않습니다.
+  // The extension runs separately in every window, so results are shared through a file to avoid duplicate API calls.
   const cacheFile = path.join(context.globalStorageUri.fsPath, "usage-cache.json");
   const items = new Map();
   const results = {};
@@ -385,7 +401,7 @@ function activate(context) {
 
   for (const source of SOURCES) {
     const item = vscode.window.createStatusBarItem(`aiUsage.${source.id}`, vscode.StatusBarAlignment.Right, source.priority);
-    item.name = `${source.title} 남은 사용량`;
+    item.name = t("{0} usage remaining", source.title);
     item.command = "aiUsage.refresh";
     items.set(source.id, item);
     context.subscriptions.push(item);
@@ -431,7 +447,7 @@ function activate(context) {
     pollTimer = setInterval(() => refresh(false), intervalMs());
   }
 
-  // 툴팁의 남은 시간을 갱신하고, 초기화 시각이 지난 한도가 있으면 바로 다시 조회합니다.
+  // Keeps the tooltip's time-left current, and refreshes right away once a limit's reset time has passed.
   const tickTimer = setInterval(() => {
     const now = Date.now();
     const passed = Object.values(results).some((r) => r && r.ok &&
